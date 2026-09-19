@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { CaseRow, PipelineResult, Subscriber, SubscriberResult, ToastMessage } from "../types";
+import React, { useState, useEffect, useRef } from "react";
+import { CaseRow, PipelineResult, Subscriber, SubscriberResult, ToastMessage, InboxFile } from "../types";
 import { 
   AlertCircle, 
   CheckCircle, 
@@ -20,7 +20,11 @@ import {
   Copy,
   ExternalLink,
   Plus,
-  Table
+  Table,
+  FolderArchive,
+  Trash2,
+  Upload,
+  Inbox
 } from "lucide-react";
 
 interface Props {
@@ -46,6 +50,96 @@ export const ProcessPipeline: React.FC<Props> = ({
   const [showCustomCaseEditor, setShowCustomCaseEditor] = useState(false);
   const [rawCauseListText, setRawCauseListText] = useState("");
   const [customCasesList, setCustomCasesList] = useState<CaseRow[] | null>(null);
+
+  // Watched Inbox (/data/inbox) state
+  const [inboxFiles, setInboxFiles] = useState<InboxFile[]>([]);
+  const [selectedInboxFile, setSelectedInboxFile] = useState<string | null>(null);
+  const [isLoadingInbox, setIsLoadingInbox] = useState(false);
+  const [showInboxManager, setShowInboxManager] = useState(false);
+  const inboxFileInputRef = useRef<HTMLInputElement>(null);
+
+  const fetchInboxFiles = async () => {
+    try {
+      setIsLoadingInbox(true);
+      const res = await fetch("/api/inbox");
+      if (res.ok) {
+        const data = await res.json();
+        setInboxFiles(data);
+      }
+    } catch (e) {
+      console.error("Failed to fetch inbox files", e);
+    } finally {
+      setIsLoadingInbox(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchInboxFiles();
+  }, []);
+
+  const handleSelectInboxFile = (filename: string) => {
+    setSelectedInboxFile(filename);
+    setUseSampleList(false);
+    setSelectedFile(null);
+    setCustomCasesList(null);
+    onNotify("info", `Selected inbox file: ${filename}`);
+  };
+
+  const handleCreateDemoInboxFile = async () => {
+    try {
+      const res = await fetch("/api/inbox/create-sample", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Failed to create sample");
+      onNotify("success", `Placed demo cause list in /data/inbox: ${data.filename}`);
+      await fetchInboxFiles();
+      handleSelectInboxFile(data.filename);
+    } catch (err: any) {
+      onNotify("error", err.message);
+    }
+  };
+
+  const handleUploadToInbox = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = reader.result as string;
+        const res = await fetch("/api/inbox/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: file.name, base64 }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || "Upload failed");
+        onNotify("success", `Uploaded ${file.name} directly into /data/inbox`);
+        await fetchInboxFiles();
+        handleSelectInboxFile(data.filename);
+      };
+      reader.readAsDataURL(file);
+    } catch (err: any) {
+      onNotify("error", `Failed to upload: ${err.message}`);
+    } finally {
+      if (inboxFileInputRef.current) inboxFileInputRef.current.value = "";
+    }
+  };
+
+  const handleDeleteInboxFile = async (filename: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/inbox/${encodeURIComponent(filename)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
+      if (selectedInboxFile === filename) {
+        setSelectedInboxFile(null);
+        setUseSampleList(true);
+      }
+      onNotify("info", `Removed ${filename} from inbox.`);
+      await fetchInboxFiles();
+    } catch (err: any) {
+      onNotify("error", err.message);
+    }
+  };
 
   // Pipeline execution states
   const [isRunning, setIsRunning] = useState(false);
@@ -119,6 +213,8 @@ export const ProcessPipeline: React.FC<Props> = ({
 
     const targetDesc = customCasesList 
       ? `Custom Input (${customCasesList.length} cases)` 
+      : selectedInboxFile
+      ? `Inbox File: ${selectedInboxFile}`
       : useSampleList 
       ? "High Court Daily Cause List (Sample Registry)" 
       : selectedFile?.name || "Uploaded PDF";
@@ -151,7 +247,11 @@ export const ProcessPipeline: React.FC<Props> = ({
         body: JSON.stringify({
           courtName: courtTitle,
           benchName: benchName,
-          fileName: selectedFile ? selectedFile.name : `HighCourt_DailyList_${new Date().toISOString().slice(0, 10)}.pdf`,
+          fileName: selectedInboxFile 
+            ? selectedInboxFile 
+            : selectedFile 
+            ? selectedFile.name 
+            : `HighCourt_DailyList_${new Date().toISOString().slice(0, 10)}.pdf`,
           isDryRun: dryRun,
           customCases: customCasesList || null
         }),
@@ -318,11 +418,99 @@ _Automated Dispatch by Cause List Bot Web App_`;
         </div>
 
         {/* Input Selector */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-6">
-          {/* Option A: Upload PDF */}
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 pt-6">
+          {/* Option 1: Watched Inbox (/data/inbox) */}
+          <div 
+            onClick={() => {
+              setShowInboxManager(true);
+              if (inboxFiles.length > 0 && !selectedInboxFile) {
+                handleSelectInboxFile(inboxFiles[0].filename);
+              }
+            }}
+            className={`p-4 rounded-xl border-2 cursor-pointer transition-all flex flex-col justify-between ${
+              selectedInboxFile 
+                ? "border-sky-500 bg-sky-50/30 ring-2 ring-sky-100" 
+                : "border-slate-200 hover:border-slate-300 bg-white"
+            }`}
+          >
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                  <Inbox className="h-4 w-4 text-emerald-600" />
+                  Watched Inbox
+                </span>
+                <div className="flex items-center gap-1">
+                  {selectedInboxFile && (
+                    <span className="text-[10px] font-bold text-sky-700 bg-sky-100 px-2 py-0.5 rounded">Selected</span>
+                  )}
+                  <span className="text-[10px] font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                    {inboxFiles.length} {inboxFiles.length === 1 ? "file" : "files"}
+                  </span>
+                </div>
+              </div>
+              <p className="text-xs text-slate-500 mb-2">
+                Production intake folder (<code className="bg-slate-100 px-1 py-0.5 rounded text-[11px]">/data/inbox</code>) for daily cause lists.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowInboxManager(!showInboxManager);
+              }}
+              className="mt-2 w-full py-1.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1"
+            >
+              <FolderArchive className="h-3.5 w-3.5" />
+              {selectedInboxFile ? `Inbox: ${selectedInboxFile.slice(0, 14)}...` : "Manage Inbox Folder"}
+            </button>
+          </div>
+
+          {/* Option 2: Preloaded High Court Cause List */}
+          <div 
+            onClick={() => {
+              setUseSampleList(true);
+              setSelectedFile(null);
+              setCustomCasesList(null);
+              setSelectedInboxFile(null);
+            }}
+            className={`p-4 rounded-xl border-2 cursor-pointer transition-all flex flex-col justify-between ${
+              useSampleList && !selectedInboxFile
+                ? "border-sky-500 bg-sky-50/30 ring-2 ring-sky-100" 
+                : "border-slate-200 hover:border-slate-300 bg-white"
+            }`}
+          >
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                  <Sparkles className="h-4 w-4 text-amber-500" />
+                  Official Daily List
+                </span>
+                {useSampleList && !selectedInboxFile && (
+                  <span className="text-[10px] font-bold text-sky-700 bg-sky-100 px-2 py-0.5 rounded">Selected</span>
+                )}
+              </div>
+              <p className="text-xs text-slate-500 mb-2">
+                Pre-configured with 10 High Court courtroom listings (W.P., CRL.A., ARB.P.) matching registered advocates.
+              </p>
+            </div>
+
+            <div className="bg-white/80 p-2 rounded-lg border border-slate-200 text-xs text-slate-600 space-y-0.5">
+              <div className="flex justify-between">
+                <span className="text-slate-400">Total Matters:</span>
+                <span className="font-semibold text-slate-800">10 Listed Cases</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-400">Advocates:</span>
+                <span className="font-semibold text-emerald-600 truncate max-w-[150px]">Sharma, Deshmukh, Rao, etc.</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Option 3: Upload PDF directly */}
           <div 
             className={`p-4 rounded-xl border-2 transition-all flex flex-col justify-between ${
-              !useSampleList && !customCasesList
+              selectedFile && !useSampleList && !customCasesList && !selectedInboxFile
                 ? "border-sky-500 bg-sky-50/20" 
                 : "border-dashed border-slate-300 hover:border-slate-400 bg-slate-50/50"
             }`}
@@ -331,14 +519,14 @@ _Automated Dispatch by Cause List Bot Web App_`;
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
                   <FileUp className="h-4 w-4 text-sky-600" />
-                  Upload Cause List PDF
+                  Upload PDF File
                 </span>
-                {!useSampleList && !customCasesList && (
+                {selectedFile && !selectedInboxFile && (
                   <span className="text-[10px] font-bold text-sky-700 bg-sky-100 px-2 py-0.5 rounded">Selected</span>
                 )}
               </div>
               <p className="text-xs text-slate-500 mb-3">
-                Select any High Court cause list PDF downloaded from the official registry.
+                Select any High Court cause list PDF downloaded from your local device.
               </p>
             </div>
 
@@ -359,47 +547,7 @@ _Automated Dispatch by Cause List Bot Web App_`;
             </div>
           </div>
 
-          {/* Option B: Preloaded High Court Cause List */}
-          <div 
-            onClick={() => {
-              setUseSampleList(true);
-              setSelectedFile(null);
-              setCustomCasesList(null);
-            }}
-            className={`p-4 rounded-xl border-2 cursor-pointer transition-all flex flex-col justify-between ${
-              useSampleList 
-                ? "border-sky-500 bg-sky-50/30 ring-2 ring-sky-100" 
-                : "border-slate-200 hover:border-slate-300 bg-white"
-            }`}
-          >
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
-                  <Sparkles className="h-4 w-4 text-amber-500" />
-                  Official Daily Cause List
-                </span>
-                {useSampleList && (
-                  <span className="text-[10px] font-bold text-sky-700 bg-sky-100 px-2 py-0.5 rounded">Selected</span>
-                )}
-              </div>
-              <p className="text-xs text-slate-500 mb-2">
-                Pre-configured with 10 High Court courtroom listings (W.P., CRL.A., ARB.P., Bail Matters) matching registered advocates.
-              </p>
-            </div>
-
-            <div className="bg-white/80 p-2 rounded-lg border border-slate-200 text-xs text-slate-600 space-y-0.5">
-              <div className="flex justify-between">
-                <span className="text-slate-400">Total Matters:</span>
-                <span className="font-semibold text-slate-800">10 Listed Cases</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-400">Advocates:</span>
-                <span className="font-semibold text-emerald-600 truncate max-w-[150px]">Sharma, Deshmukh, Rao, etc.</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Option C: Paste Cause List Text / Custom Editor */}
+          {/* Option 4: Paste Cause List Text / Custom Editor */}
           <div 
             onClick={() => {
               setShowCustomCaseEditor(true);
@@ -414,7 +562,7 @@ _Automated Dispatch by Cause List Bot Web App_`;
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
                   <Table className="h-4 w-4 text-violet-600" />
-                  Paste / Custom Cause List
+                  Paste / Custom Text
                 </span>
                 {customCasesList && (
                   <span className="text-[10px] font-bold text-violet-700 bg-violet-100 px-2 py-0.5 rounded">
@@ -423,7 +571,7 @@ _Automated Dispatch by Cause List Bot Web App_`;
                 )}
               </div>
               <p className="text-xs text-slate-500 mb-2">
-                Paste raw tabular text from any court website or notice board to parse and test immediately.
+                Paste courtroom notice board text to parse and test immediately.
               </p>
             </div>
 
@@ -436,10 +584,129 @@ _Automated Dispatch by Cause List Bot Web App_`;
               className="mt-2 w-full py-1.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1"
             >
               <Plus className="h-3.5 w-3.5" />
-              {customCasesList ? "Edit Custom Cases" : "Paste Raw Cause List"}
+              {customCasesList ? "Edit Custom Cases" : "Paste Raw Text"}
             </button>
           </div>
         </div>
+
+        {/* Watched Inbox Manager Drawer */}
+        {showInboxManager && (
+          <div className="mt-4 p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-slate-200">
+              <div className="flex items-center gap-2">
+                <Inbox className="h-4 w-4 text-emerald-600" />
+                <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                  Watched Cause List Intake Folder (<span className="font-mono text-slate-600">/data/inbox</span>)
+                </h4>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  type="file"
+                  ref={inboxFileInputRef}
+                  onChange={handleUploadToInbox}
+                  accept=".pdf"
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => inboxFileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 rounded text-xs font-semibold shadow-2xs"
+                >
+                  <Upload className="h-3 w-3 text-slate-600" />
+                  Drop PDF to Inbox
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreateDemoInboxFile}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 border border-emerald-300 hover:bg-emerald-100 text-emerald-800 rounded text-xs font-semibold shadow-2xs"
+                >
+                  <Sparkles className="h-3 w-3 text-emerald-600" />
+                  Place Sample in Inbox
+                </button>
+                <button
+                  type="button"
+                  onClick={fetchInboxFiles}
+                  disabled={isLoadingInbox}
+                  className="inline-flex items-center gap-1 px-2 py-1 bg-white border border-slate-200 hover:bg-slate-100 text-slate-600 rounded text-xs font-medium"
+                >
+                  <RefreshCw className={`h-3 w-3 ${isLoadingInbox ? "animate-spin" : ""}`} />
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowInboxManager(false)}
+                  className="text-xs text-slate-400 hover:text-slate-600 px-2 py-1"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            {inboxFiles.length === 0 ? (
+              <div className="p-4 bg-white border border-slate-200 rounded-lg text-center text-xs text-slate-500">
+                <p className="font-medium text-slate-700">No cause list files currently pending in /data/inbox.</p>
+                <p className="text-slate-400 mt-1">
+                  Click "Place Sample in Inbox" or "Drop PDF to Inbox" above to stage a daily cause list for automated processing.
+                </p>
+              </div>
+            ) : (
+              <div className="bg-white border border-slate-200 rounded-lg divide-y divide-slate-100 overflow-hidden">
+                {inboxFiles.map((file) => {
+                  const isSelected = selectedInboxFile === file.filename;
+                  return (
+                    <div
+                      key={file.filename}
+                      onClick={() => handleSelectInboxFile(file.filename)}
+                      className={`p-3 flex items-center justify-between gap-3 text-xs cursor-pointer transition-colors ${
+                        isSelected ? "bg-sky-50/70" : "hover:bg-slate-50"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <FileText className={`h-4 w-4 shrink-0 ${isSelected ? "text-sky-600" : "text-slate-400"}`} />
+                        <div className="min-w-0">
+                          <p className={`font-semibold truncate ${isSelected ? "text-sky-900 font-bold" : "text-slate-800"}`}>
+                            {file.filename}
+                          </p>
+                          <p className="text-[11px] text-slate-400">
+                            Size: {file.sizeFormatted} &bull; Uploaded: {new Date(file.uploadedAt).toLocaleTimeString()}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        {isSelected ? (
+                          <span className="px-2.5 py-1 bg-sky-600 text-white rounded text-[11px] font-bold">
+                            Active Target
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleSelectInboxFile(file.filename);
+                            }}
+                            className="px-2 py-1 bg-slate-100 hover:bg-sky-100 hover:text-sky-700 text-slate-700 rounded text-[11px] font-semibold"
+                          >
+                            Use This File
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={(e) => handleDeleteInboxFile(file.filename, e)}
+                          className="p-1 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded"
+                          title="Delete from inbox"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Custom Text Drawer */}
         {showCustomCaseEditor && (

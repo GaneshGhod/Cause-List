@@ -312,6 +312,7 @@ export default function App() {
                 onAddSubscriber={handleAddSubscriber}
                 onDeleteSubscriber={handleDeleteSubscriber}
                 onNotify={addToast}
+                onRefreshSubscribers={fetchSubscribers}
               />
             )}
 

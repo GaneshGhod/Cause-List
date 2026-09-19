@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { Subscriber, ToastMessage } from "../types";
 import { 
   CheckCircle2, 
@@ -13,8 +13,55 @@ import {
   Phone, 
   Tag, 
   Save,
-  AlertCircle
+  AlertCircle,
+  Sparkles,
+  Loader2,
+  RefreshCw,
+  Download,
+  Upload
 } from "lucide-react";
+
+function generateSmartVariants(displayName: string): string[] {
+  if (!displayName || !displayName.trim()) return [];
+  const clean = displayName.replace(/^(Adv\.?|Senior Adv\.?|Advocate|Sr\.? Adv\.?)\s+/i, "").trim();
+  const variants = new Set<string>();
+
+  variants.add(displayName.trim());
+  if (clean && clean !== displayName.trim()) {
+    variants.add(clean);
+  }
+
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    const firstInitial = parts[0][0];
+    const lastName = parts[parts.length - 1];
+    variants.add(`${firstInitial}. ${lastName}`);
+    variants.add(`${parts[0]} ${lastName[0]}.`);
+    if (parts.length === 3) {
+      variants.add(`${parts[0][0]}. ${parts[1][0]}. ${lastName}`);
+      variants.add(`${parts[0]} ${parts[1][0]}. ${lastName}`);
+    }
+  }
+
+  return Array.from(variants);
+}
+
+function getPhonePreview(phone: string): string | null {
+  const cleaned = phone.replace(/[^\d+]/g, "").trim();
+  if (/^[6-9]\d{9}$/.test(cleaned)) {
+    return `+91${cleaned} (India Mobile)`;
+  }
+  if (/^0[6-9]\d{9}$/.test(cleaned)) {
+    return `+91${cleaned.substring(1)} (India Mobile)`;
+  }
+  if (/^91[6-9]\d{9}$/.test(cleaned)) {
+    return `+${cleaned} (India Mobile)`;
+  }
+  if (cleaned.startsWith("+") && cleaned.length >= 10) {
+    return cleaned;
+  }
+  return null;
+}
 
 interface Props {
   subscribers: Subscriber[];
@@ -23,6 +70,7 @@ interface Props {
   onAddSubscriber: (newSub: Omit<Subscriber, "id"> & { id: string }) => Promise<boolean>;
   onDeleteSubscriber: (id: string) => Promise<boolean>;
   onNotify: (type: ToastMessage["type"], text: string) => void;
+  onRefreshSubscribers?: () => void;
 }
 
 export const SubscribersManager: React.FC<Props> = ({
@@ -32,10 +80,55 @@ export const SubscribersManager: React.FC<Props> = ({
   onAddSubscriber,
   onDeleteSubscriber,
   onNotify,
+  onRefreshSubscribers,
 }) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterActive, setFilterActive] = useState<"all" | "active" | "paused">("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isImporting, setIsImporting] = useState(false);
+
+  const handleExportBackup = () => {
+    window.location.href = "/api/subscribers/export";
+    onNotify("info", "Initiated subscriber registry JSON backup download.");
+  };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsImporting(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      if (!Array.isArray(parsed)) {
+        throw new Error("Invalid JSON format. Expected an array of subscribers.");
+      }
+
+      const res = await fetch("/api/subscribers/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: text,
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || "Import failed");
+      }
+
+      onNotify("success", `Successfully imported ${data.importedCount} subscribers into registry.`);
+      if (onRefreshSubscribers) {
+        onRefreshSubscribers();
+      }
+    } catch (err: any) {
+      onNotify("error", `Import failed: ${err.message}`);
+    } finally {
+      setIsImporting(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
 
   // Form edit states per subscriber
   const [editForms, setEditForms] = useState<Record<string, {
@@ -51,6 +144,9 @@ export const SubscribersManager: React.FC<Props> = ({
   const [newPhone, setNewPhone] = useState("");
   const [newVariants, setNewVariants] = useState("");
   const [newActive, setNewActive] = useState(true);
+  const [isAutoVariants, setIsAutoVariants] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [showAddModal, setShowAddModal] = useState(false);
 
@@ -95,14 +191,13 @@ export const SubscribersManager: React.FC<Props> = ({
       return;
     }
 
-    const parsedVariants = data.variants_input
+    let parsedVariants = data.variants_input
       .split(",")
       .map(s => s.trim())
       .filter(Boolean);
 
     if (parsedVariants.length === 0) {
-      onNotify("error", "At least one name variant alias is required for case matching.");
-      return;
+      parsedVariants = generateSmartVariants(data.display_name);
     }
 
     const success = await onUpdateSubscriber(id, {
@@ -117,29 +212,80 @@ export const SubscribersManager: React.FC<Props> = ({
     }
   };
 
-  // Inline validation for New Subscriber Form
+  // Robust next ID generator that avoids duplicates
+  const suggestNextId = () => {
+    let maxNum = 0;
+    for (const sub of subscribers) {
+      const match = String(sub.id || "").match(/SUB-(\d+)/i);
+      if (match) {
+        const n = parseInt(match[1], 10);
+        if (!isNaN(n) && n > maxNum) maxNum = n;
+      }
+    }
+    let candidateNum = Math.max(maxNum + 1, subscribers.length + 1);
+    let candidate = `SUB-${String(candidateNum).padStart(3, "0")}`;
+    while (subscribers.some(s => String(s.id).toUpperCase() === candidate.toUpperCase())) {
+      candidateNum++;
+      candidate = `SUB-${String(candidateNum).padStart(3, "0")}`;
+    }
+    return candidate;
+  };
+
+  const openAddModal = () => {
+    const nextId = suggestNextId();
+    setNewId(nextId);
+    setNewName("");
+    setNewPhone("");
+    setNewVariants("");
+    setNewActive(true);
+    setIsAutoVariants(true);
+    setFormErrors({});
+    setSubmitError(null);
+    setIsSubmitting(false);
+    setShowAddModal(true);
+  };
+
+  const handleNameChange = (val: string) => {
+    setNewName(val);
+    if (formErrors.name) setFormErrors(prev => ({ ...prev, name: "" }));
+    if (submitError) setSubmitError(null);
+
+    // Auto-generate variants if user hasn't typed custom variants yet
+    if (isAutoVariants || !newVariants.trim()) {
+      const generated = generateSmartVariants(val);
+      setNewVariants(generated.join(", "));
+      setIsAutoVariants(true);
+      if (formErrors.variants) setFormErrors(prev => ({ ...prev, variants: "" }));
+    }
+  };
+
+  const handleManualVariantsChange = (val: string) => {
+    setNewVariants(val);
+    setIsAutoVariants(false);
+    if (formErrors.variants) setFormErrors(prev => ({ ...prev, variants: "" }));
+    if (submitError) setSubmitError(null);
+  };
+
+  const handleRegenerateVariants = () => {
+    const generated = generateSmartVariants(newName || "Advocate Name");
+    setNewVariants(generated.join(", "));
+    setIsAutoVariants(true);
+    if (formErrors.variants) setFormErrors(prev => ({ ...prev, variants: "" }));
+  };
+
+  // Validation before submission
   const validateNewForm = () => {
     const errors: Record<string, string> = {};
-    const cleanId = newId.trim().toUpperCase();
-
-    if (!cleanId) {
-      errors.id = "Subscriber ID is required (e.g. SUB-011)";
-    } else if (subscribers.some(s => s.id.toUpperCase() === cleanId)) {
-      errors.id = `ID '${cleanId}' is already registered to another advocate.`;
-    }
 
     if (!newName.trim()) {
       errors.name = "Advocate display name is required.";
     }
 
-    if (!newPhone.trim()) {
-      errors.phone = "WhatsApp number is required (with country code).";
-    } else if (!/^\+?[0-9\s\-()]{8,20}$/.test(newPhone.trim())) {
-      errors.phone = "Enter valid phone digits with country code (e.g. +919820123456).";
-    }
-
-    if (!newVariants.trim()) {
-      errors.variants = "Provide at least one name variant (e.g. 'R. K. Sharma, Rajesh Sharma').";
+    const cleanDigits = newPhone.replace(/[^\d+]/g, "").trim();
+    if (!cleanDigits) {
+      errors.phone = "WhatsApp number is required (e.g. 9820123456 or +919820123456).";
+    } else if (cleanDigits.replace(/\D/g, "").length < 8) {
+      errors.phone = "Please enter at least 8-10 digits.";
     }
 
     setFormErrors(errors);
@@ -148,46 +294,56 @@ export const SubscribersManager: React.FC<Props> = ({
 
   const handleAddNewSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSubmitError(null);
+
     if (!validateNewForm()) {
-      onNotify("warning", "Please correct the form errors before submitting.");
+      onNotify("warning", "Please provide advocate name and WhatsApp number.");
       return;
     }
 
-    const parsedVariants = newVariants
-      .split(",")
-      .map(s => s.trim())
-      .filter(Boolean);
+    setIsSubmitting(true);
+    try {
+      // Auto-assign ID if empty or collides
+      let finalId = newId.trim().toUpperCase();
+      if (!finalId || subscribers.some(s => String(s.id).toUpperCase() === finalId)) {
+        finalId = suggestNextId();
+      }
 
-    const success = await onAddSubscriber({
-      id: newId.trim().toUpperCase(),
-      display_name: newName.trim(),
-      whatsapp_number: newPhone.trim(),
-      name_variants: parsedVariants,
-      active: newActive,
-    });
+      // Extract variants or auto-generate
+      let parsedVariants = newVariants
+        .split(",")
+        .map(s => s.trim())
+        .filter(Boolean);
 
-    if (success) {
-      // Reset form
-      setNewId("");
-      setNewName("");
-      setNewPhone("");
-      setNewVariants("");
-      setNewActive(true);
-      setFormErrors({});
-      setShowAddModal(false);
+      if (parsedVariants.length === 0) {
+        parsedVariants = generateSmartVariants(newName);
+      }
+
+      const success = await onAddSubscriber({
+        id: finalId,
+        display_name: newName.trim(),
+        whatsapp_number: newPhone.trim(),
+        name_variants: parsedVariants,
+        active: newActive,
+      });
+
+      if (success) {
+        setNewId("");
+        setNewName("");
+        setNewPhone("");
+        setNewVariants("");
+        setNewActive(true);
+        setFormErrors({});
+        setSubmitError(null);
+        setShowAddModal(false);
+      } else {
+        setSubmitError("Failed to register subscriber. Please verify details and try again.");
+      }
+    } catch (err: any) {
+      setSubmitError(err.message || "An unexpected error occurred.");
+    } finally {
+      setIsSubmitting(false);
     }
-  };
-
-  // Suggest next ID
-  const suggestNextId = () => {
-    const nextNum = subscribers.length + 1;
-    return `SUB-${String(nextNum).padStart(3, "0")}`;
-  };
-
-  const openAddModal = () => {
-    setNewId(suggestNextId());
-    setFormErrors({});
-    setShowAddModal(true);
   };
 
   // Filtered subscribers list
@@ -253,14 +409,49 @@ export const SubscribersManager: React.FC<Props> = ({
           </div>
         </div>
 
-        <button
-          id="add-subscriber-btn"
-          onClick={openAddModal}
-          className="inline-flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-xs transition-colors"
-        >
-          <Plus className="h-4 w-4" />
-          Add Advocate Subscriber
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Hidden File Input for JSON Backup Import */}
+          <input
+            id="subscribers-backup-file-input"
+            type="file"
+            ref={fileInputRef}
+            onChange={handleImportFile}
+            accept=".json,application/json"
+            className="hidden"
+          />
+
+          <button
+            id="export-subscribers-btn"
+            type="button"
+            onClick={handleExportBackup}
+            title="Download JSON registry backup"
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors border border-slate-200"
+          >
+            <Download className="h-3.5 w-3.5 text-slate-600" />
+            Export Backup
+          </button>
+
+          <button
+            id="import-subscribers-btn"
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isImporting}
+            title="Import or restore subscribers from JSON backup file"
+            className="inline-flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors border border-slate-200 disabled:opacity-50"
+          >
+            {isImporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5 text-slate-600" />}
+            Import Backup
+          </button>
+
+          <button
+            id="add-subscriber-btn"
+            onClick={openAddModal}
+            className="inline-flex items-center justify-center gap-2 bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-xs transition-colors"
+          >
+            <Plus className="h-4 w-4" />
+            Add Advocate
+          </button>
+        </div>
       </div>
 
       {/* Subscriber Cards List */}
@@ -487,12 +678,36 @@ export const SubscribersManager: React.FC<Props> = ({
               </button>
             </div>
 
+            {submitError && (
+              <div className="mt-4 p-3 bg-rose-50 border border-rose-200 rounded-lg flex items-start gap-2.5">
+                <AlertCircle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="text-xs text-rose-800">
+                  <p className="font-semibold">Unable to register advocate</p>
+                  <p className="mt-0.5">{submitError}</p>
+                </div>
+              </div>
+            )}
+
             <form onSubmit={handleAddNewSubmit} className="space-y-4 pt-4">
               <div className="grid grid-cols-3 gap-3">
                 <div className="col-span-1">
-                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
-                    Subscriber ID *
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-bold text-slate-700 uppercase">
+                      ID *
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewId(suggestNextId());
+                        if (formErrors.id) setFormErrors(prev => ({ ...prev, id: "" }));
+                      }}
+                      title="Generate next available ID"
+                      className="text-[10px] text-sky-600 hover:text-sky-700 flex items-center gap-0.5 font-medium"
+                    >
+                      <RefreshCw className="h-2.5 w-2.5" />
+                      Auto
+                    </button>
+                  </div>
                   <input
                     id="new-sub-id-input"
                     type="text"
@@ -500,6 +715,7 @@ export const SubscribersManager: React.FC<Props> = ({
                     onChange={(e) => {
                       setNewId(e.target.value.toUpperCase());
                       if (formErrors.id) setFormErrors(prev => ({ ...prev, id: "" }));
+                      if (submitError) setSubmitError(null);
                     }}
                     placeholder="SUB-011"
                     className={`w-full px-3 py-2 border rounded-lg text-sm font-mono uppercase focus:outline-hidden ${
@@ -517,10 +733,7 @@ export const SubscribersManager: React.FC<Props> = ({
                     id="new-sub-name-input"
                     type="text"
                     value={newName}
-                    onChange={(e) => {
-                      setNewName(e.target.value);
-                      if (formErrors.name) setFormErrors(prev => ({ ...prev, name: "" }));
-                    }}
+                    onChange={(e) => handleNameChange(e.target.value)}
                     placeholder="e.g. Adv. Rohit Deshpande"
                     className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-hidden ${
                       formErrors.name ? "border-rose-400 bg-rose-50" : "border-slate-300 focus:ring-2 focus:ring-sky-500"
@@ -531,9 +744,16 @@ export const SubscribersManager: React.FC<Props> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
-                  WhatsApp Number (with Country Code) *
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-bold text-slate-700 uppercase">
+                    WhatsApp Phone Number *
+                  </label>
+                  {getPhonePreview(newPhone) && (
+                    <span className="text-[11px] font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-sm border border-emerald-100">
+                      ✓ {getPhonePreview(newPhone)}
+                    </span>
+                  )}
+                </div>
                 <input
                   id="new-sub-phone-input"
                   type="text"
@@ -541,27 +761,41 @@ export const SubscribersManager: React.FC<Props> = ({
                   onChange={(e) => {
                     setNewPhone(e.target.value);
                     if (formErrors.phone) setFormErrors(prev => ({ ...prev, phone: "" }));
+                    if (submitError) setSubmitError(null);
                   }}
-                  placeholder="+919876543210"
+                  placeholder="e.g. 9820123456 or +919820123456"
                   className={`w-full px-3 py-2 border rounded-lg text-sm font-mono focus:outline-hidden ${
                     formErrors.phone ? "border-rose-400 bg-rose-50" : "border-slate-300 focus:ring-2 focus:ring-sky-500"
                   }`}
                 />
-                {formErrors.phone && <p className="text-[11px] text-rose-600 mt-1 font-medium">{formErrors.phone}</p>}
+                {formErrors.phone ? (
+                  <p className="text-[11px] text-rose-600 mt-1 font-medium">{formErrors.phone}</p>
+                ) : (
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Accepts 10-digit Indian numbers (auto-adds +91) or international format.
+                  </p>
+                )}
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
-                  Name Variants (comma-separated) *
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-bold text-slate-700 uppercase">
+                    Name Variants / Aliases
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleRegenerateVariants}
+                    className="text-[11px] text-sky-600 hover:text-sky-700 flex items-center gap-1 font-medium"
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    Auto-Fill from Name
+                  </button>
+                </div>
                 <textarea
                   id="new-sub-variants-input"
                   rows={2}
                   value={newVariants}
-                  onChange={(e) => {
-                    setNewVariants(e.target.value);
-                    if (formErrors.variants) setFormErrors(prev => ({ ...prev, variants: "" }));
-                  }}
+                  onChange={(e) => handleManualVariantsChange(e.target.value)}
                   placeholder="e.g. Rohit Deshpande, R. Deshpande, Rohit D."
                   className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-hidden ${
                     formErrors.variants ? "border-rose-400 bg-rose-50" : "border-slate-300 focus:ring-2 focus:ring-sky-500"
@@ -571,7 +805,7 @@ export const SubscribersManager: React.FC<Props> = ({
                   <p className="text-[11px] text-rose-600 mt-1 font-medium">{formErrors.variants}</p>
                 ) : (
                   <p className="text-[11px] text-slate-500 mt-1">
-                    Matching is case-insensitive substring across every cell in each row.
+                    Used to match advocate entries across High Court cause list rows. If blank, auto-generates from display name.
                   </p>
                 )}
               </div>
@@ -585,7 +819,7 @@ export const SubscribersManager: React.FC<Props> = ({
                     className="h-4 w-4 rounded-sm border-slate-300 text-sky-600 focus:ring-sky-500"
                   />
                   <span className="text-xs font-semibold text-slate-700">
-                    Active immediately (included in today's dispatch)
+                    Active immediately (included in cause list dispatches)
                   </span>
                 </label>
               </div>
@@ -594,16 +828,28 @@ export const SubscribersManager: React.FC<Props> = ({
                 <button
                   type="button"
                   onClick={() => setShowAddModal(false)}
-                  className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   id="submit-new-subscriber-btn"
                   type="submit"
-                  className="px-5 py-2 text-sm font-semibold bg-sky-600 hover:bg-sky-700 text-white rounded-lg shadow-xs transition-colors"
+                  disabled={isSubmitting}
+                  className="inline-flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-sky-600 hover:bg-sky-700 disabled:bg-sky-400 text-white rounded-lg shadow-xs transition-colors"
                 >
-                  Register Subscriber
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Registering...
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="h-4 w-4" />
+                      Register Subscriber
+                    </>
+                  )}
                 </button>
               </div>
             </form>

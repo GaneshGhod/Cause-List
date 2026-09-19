@@ -1,16 +1,13 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { fileURLToPath } from "url";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const PORT = 3000;
-const SUBSCRIBERS_PATH = path.join(__dirname, "subscribers.json");
-const LOG_PATH = path.join(__dirname, "cause_list_bot.log");
-const DATA_DIR = path.join(__dirname, "data");
+const ROOT_DIR = process.cwd();
+const SUBSCRIBERS_PATH = path.join(ROOT_DIR, "subscribers.json");
+const LOG_PATH = path.join(ROOT_DIR, "cause_list_bot.log");
+const DATA_DIR = path.join(ROOT_DIR, "data");
 const OUTPUT_DIR = path.join(DATA_DIR, "output");
 const INBOX_DIR = path.join(DATA_DIR, "inbox");
 const ARCHIVE_DIR = path.join(DATA_DIR, "archive");
@@ -42,20 +39,103 @@ function appendLog(level: string, message: string) {
   }
 }
 
+// Production process crash prevention & safety guards
+process.on("uncaughtException", (err: Error) => {
+  console.error("[FATAL] Uncaught Exception caught by production guard:", err);
+  appendLog("ERROR", `Uncaught exception prevented crash: ${err.message}`);
+});
+
+process.on("unhandledRejection", (reason: any) => {
+  console.error("[FATAL] Unhandled Rejection caught by production guard:", reason);
+  appendLog("ERROR", `Unhandled promise rejection: ${reason instanceof Error ? reason.message : String(reason)}`);
+});
+
 function readSubscribers() {
-  if (!fs.existsSync(SUBSCRIBERS_PATH)) {
+  const targetPath = fs.existsSync(path.join(process.cwd(), "subscribers.json"))
+    ? path.join(process.cwd(), "subscribers.json")
+    : SUBSCRIBERS_PATH;
+
+  if (!fs.existsSync(targetPath)) {
     return [];
   }
-  const raw = fs.readFileSync(SUBSCRIBERS_PATH, "utf-8");
   try {
+    const raw = fs.readFileSync(targetPath, "utf-8");
     return JSON.parse(raw);
-  } catch {
+  } catch (e) {
+    console.error("Error reading subscribers.json:", e);
     return [];
   }
 }
 
 function writeSubscribers(data: any) {
-  fs.writeFileSync(SUBSCRIBERS_PATH, JSON.stringify(data, null, 2), "utf-8");
+  const targetPath = fs.existsSync(path.join(process.cwd(), "subscribers.json"))
+    ? path.join(process.cwd(), "subscribers.json")
+    : SUBSCRIBERS_PATH;
+  fs.writeFileSync(targetPath, JSON.stringify(data, null, 2), "utf-8");
+}
+
+function normalizePhoneNumber(input: string): string {
+  if (!input) return "";
+  const cleaned = input.replace(/[^\d+]/g, "").trim();
+  if (cleaned.startsWith("+")) {
+    return cleaned;
+  }
+  // Standard Indian 10-digit mobile number
+  if (/^[6-9]\d{9}$/.test(cleaned)) {
+    return `+91${cleaned}`;
+  }
+  // 11-digit starting with 0 (e.g. 09876543210)
+  if (/^0[6-9]\d{9}$/.test(cleaned)) {
+    return `+91${cleaned.substring(1)}`;
+  }
+  // 12-digit starting with 91 (e.g. 919876543210)
+  if (/^91[6-9]\d{9}$/.test(cleaned)) {
+    return `+${cleaned}`;
+  }
+  return cleaned.startsWith("+") ? cleaned : `+${cleaned}`;
+}
+
+function generateSmartNameVariants(displayName: string): string[] {
+  if (!displayName || !displayName.trim()) return [];
+  const clean = displayName.replace(/^(Adv\.?|Senior Adv\.?|Advocate|Sr\.? Adv\.?)\s+/i, "").trim();
+  const variants = new Set<string>();
+
+  variants.add(displayName.trim());
+  if (clean && clean !== displayName.trim()) {
+    variants.add(clean);
+  }
+
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    const firstInitial = parts[0][0];
+    const lastName = parts[parts.length - 1];
+    variants.add(`${firstInitial}. ${lastName}`);
+    variants.add(`${parts[0]} ${lastName[0]}.`);
+    if (parts.length === 3) {
+      variants.add(`${parts[0][0]}. ${parts[1][0]}. ${lastName}`);
+      variants.add(`${parts[0]} ${parts[1][0]}. ${lastName}`);
+    }
+  }
+
+  return Array.from(variants);
+}
+
+function getNextAvailableSubscriberId(existing: any[]): string {
+  let maxNum = 0;
+  for (const sub of existing) {
+    const match = String(sub.id || "").match(/SUB-(\d+)/i);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (!isNaN(n) && n > maxNum) maxNum = n;
+    }
+  }
+  let candidateNum = Math.max(maxNum + 1, existing.length + 1);
+  let candidate = `SUB-${String(candidateNum).padStart(3, "0")}`;
+  while (existing.some((s: any) => String(s.id).toUpperCase() === candidate.toUpperCase())) {
+    candidateNum++;
+    candidate = `SUB-${String(candidateNum).padStart(3, "0")}`;
+  }
+  return candidate;
 }
 
 // Realistic High Court Sample Cases
@@ -349,9 +429,45 @@ async function startServer() {
   // API ROUTES
   // ==========================================
 
-  // Health check
+  // Comprehensive production health & readiness check
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString() });
+    try {
+      const subs = readSubscribers();
+      const activeSubs = subs.filter((s: any) => s.active);
+      const outputCount = fs.existsSync(OUTPUT_DIR) 
+        ? fs.readdirSync(OUTPUT_DIR).filter(f => f.endsWith(".pdf")).length 
+        : 0;
+      const inboxCount = fs.existsSync(INBOX_DIR)
+        ? fs.readdirSync(INBOX_DIR).length
+        : 0;
+      const memory = process.memoryUsage();
+
+      res.json({
+        status: "ok",
+        service: "Cause List Bot",
+        environment: process.env.NODE_ENV || "production",
+        uptimeSeconds: Math.floor(process.uptime()),
+        timestamp: new Date().toISOString(),
+        metrics: {
+          totalSubscribers: subs.length,
+          activeSubscribers: activeSubs.length,
+          pausedSubscribers: subs.length - activeSubs.length,
+          generatedPdfs: outputCount,
+          inboxPendingFiles: inboxCount,
+          memoryHeapMB: Math.round(memory.heapUsed / 1024 / 1024),
+          memoryRssMB: Math.round(memory.rss / 1024 / 1024)
+        },
+        storage: {
+          dataDirReady: fs.existsSync(DATA_DIR),
+          inboxDirReady: fs.existsSync(INBOX_DIR),
+          outputDirReady: fs.existsSync(OUTPUT_DIR),
+          archiveDirReady: fs.existsSync(ARCHIVE_DIR),
+          logFileReady: fs.existsSync(LOG_PATH)
+        }
+      });
+    } catch (e: any) {
+      res.status(500).json({ status: "error", error: e.message });
+    }
   });
 
   // Get all subscribers
@@ -364,40 +480,46 @@ async function startServer() {
     }
   });
 
-  // Create new subscriber with inline validations
+  // Create new subscriber with smart defaults & normalization
   app.post("/api/subscribers", (req, res) => {
     try {
       const { id, display_name, name_variants, whatsapp_number, active } = req.body;
-      const cleanId = (id || "").trim().toUpperCase();
+      const existing = readSubscribers();
 
-      if (!cleanId) {
-        return res.status(400).json({ error: "Subscriber ID is required." });
-      }
       if (!display_name || !display_name.trim()) {
         return res.status(400).json({ error: "Advocate display name is required." });
       }
+
       if (!whatsapp_number || !whatsapp_number.trim()) {
         return res.status(400).json({ error: "WhatsApp telephone number is required." });
       }
 
-      const existing = readSubscribers();
-      if (existing.some((s: any) => s.id.toUpperCase() === cleanId)) {
-        return res.status(400).json({ error: `Subscriber ID '${cleanId}' is already registered. Please choose a unique ID.` });
+      // Auto-assign clean unique ID if missing or colliding
+      let cleanId = (id || "").trim().toUpperCase();
+      if (!cleanId || existing.some((s: any) => String(s.id).toUpperCase() === cleanId)) {
+        cleanId = getNextAvailableSubscriberId(existing);
       }
 
-      const variants = Array.isArray(name_variants)
-        ? name_variants.map((v: string) => v.trim()).filter(Boolean)
-        : (name_variants || "").split(",").map((v: string) => v.trim()).filter(Boolean);
+      // Normalize phone number (auto-adds +91 for Indian 10-digit mobile numbers)
+      const normalizedPhone = normalizePhoneNumber(whatsapp_number);
+
+      // Extract or auto-generate name variants
+      let variants: string[] = [];
+      if (Array.isArray(name_variants) && name_variants.length > 0) {
+        variants = name_variants.map((v: string) => v.trim()).filter(Boolean);
+      } else if (typeof name_variants === "string" && name_variants.trim()) {
+        variants = name_variants.split(",").map((v: string) => v.trim()).filter(Boolean);
+      }
 
       if (variants.length === 0) {
-        return res.status(400).json({ error: "At least one name variant alias is required for case matching." });
+        variants = generateSmartNameVariants(display_name);
       }
 
       const newSubscriber = {
         id: cleanId,
         display_name: display_name.trim(),
         name_variants: variants,
-        whatsapp_number: whatsapp_number.trim(),
+        whatsapp_number: normalizedPhone,
         active: active !== undefined ? Boolean(active) : true
       };
 
@@ -425,12 +547,16 @@ async function startServer() {
       }
 
       if (display_name !== undefined) existing[index].display_name = display_name.trim();
-      if (whatsapp_number !== undefined) existing[index].whatsapp_number = whatsapp_number.trim();
+      if (whatsapp_number !== undefined) existing[index].whatsapp_number = normalizePhoneNumber(whatsapp_number);
       if (active !== undefined) existing[index].active = Boolean(active);
       if (name_variants !== undefined) {
-        existing[index].name_variants = Array.isArray(name_variants)
+        let variants = Array.isArray(name_variants)
           ? name_variants.map((v: string) => v.trim()).filter(Boolean)
           : (name_variants || "").split(",").map((v: string) => v.trim()).filter(Boolean);
+        if (variants.length === 0 && existing[index].display_name) {
+          variants = generateSmartNameVariants(existing[index].display_name);
+        }
+        existing[index].name_variants = variants;
       }
 
       writeSubscribers(existing);
@@ -480,6 +606,230 @@ async function startServer() {
 
       appendLog("INFO", `[SUBSCRIBER DELETED] Removed subscriber ${found.display_name} (${targetId}).`);
       res.json({ success: true, id: targetId });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Export Subscribers Registry Backup
+  app.get("/api/subscribers/export", (req, res) => {
+    try {
+      const subs = readSubscribers();
+      const filename = `CauseListBot_Subscribers_Backup_${new Date().toISOString().slice(0, 10)}.json`;
+      res.setHeader("Content-Type", "application/json");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.send(JSON.stringify(subs, null, 2));
+      appendLog("INFO", `[BACKUP] Exported ${subs.length} subscribers to ${filename}`);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Import Subscribers Registry Backup
+  app.post("/api/subscribers/import", (req, res) => {
+    try {
+      const incoming = req.body;
+      if (!Array.isArray(incoming)) {
+        return res.status(400).json({ error: "Invalid backup format. Expected an array of subscribers." });
+      }
+
+      const existing = readSubscribers();
+      const existingMap = new Map(existing.map((s: any) => [s.id, s]));
+      let importedCount = 0;
+
+      for (const item of incoming) {
+        if (!item || !item.display_name) continue;
+        let id = (item.id || "").trim().toUpperCase();
+        if (!id || existingMap.has(id)) {
+          id = getNextAvailableSubscriberId(Array.from(existingMap.values()));
+        }
+
+        const normalizedPhone = normalizePhoneNumber(item.whatsapp_number || "");
+        let variants = Array.isArray(item.name_variants)
+          ? item.name_variants.map((v: string) => v.trim()).filter(Boolean)
+          : generateSmartNameVariants(item.display_name);
+        
+        if (variants.length === 0) {
+          variants = generateSmartNameVariants(item.display_name);
+        }
+
+        const newEntry = {
+          id,
+          display_name: item.display_name.trim(),
+          name_variants: variants,
+          whatsapp_number: normalizedPhone,
+          active: item.active !== undefined ? Boolean(item.active) : true,
+        };
+
+        existingMap.set(id, newEntry);
+        importedCount++;
+      }
+
+      const updatedList = Array.from(existingMap.values());
+      writeSubscribers(updatedList);
+      appendLog("INFO", `[BACKUP IMPORT] Successfully imported/merged ${importedCount} subscriber records. Total in registry: ${updatedList.length}`);
+      res.json({ success: true, importedCount, total: updatedList.length, subscribers: updatedList });
+    } catch (err: any) {
+      appendLog("ERROR", `Failed to import subscribers: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ==========================================
+  // INBOX FOLDER MANAGEMENT ENDPOINTS
+  // ==========================================
+
+  // List all files in inbox
+  app.get("/api/inbox", (req, res) => {
+    try {
+      if (!fs.existsSync(INBOX_DIR)) {
+        return res.json([]);
+      }
+      const files = fs.readdirSync(INBOX_DIR);
+      const list = files
+        .filter(f => !f.startsWith("."))
+        .map(file => {
+          const filePath = path.join(INBOX_DIR, file);
+          const stat = fs.statSync(filePath);
+          return {
+            filename: file,
+            sizeBytes: stat.size,
+            sizeFormatted: stat.size > 1024 * 1024 
+              ? `${(stat.size / (1024 * 1024)).toFixed(2)} MB` 
+              : `${(stat.size / 1024).toFixed(1)} KB`,
+            uploadedAt: stat.birthtime || stat.mtime,
+            status: "pending" as const,
+          };
+        })
+        .sort((a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime());
+
+      res.json(list);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Upload or drop a cause list PDF into the inbox
+  app.post("/api/inbox/upload", async (req, res) => {
+    try {
+      const { filename, base64 } = req.body;
+      if (!filename) {
+        return res.status(400).json({ error: "Filename is required" });
+      }
+
+      const safeName = path.basename(filename).replace(/[^a-zA-Z0-9._-]/g, "_");
+      const targetPath = path.join(INBOX_DIR, safeName);
+
+      if (base64) {
+        const cleanBase64 = base64.replace(/^data:.*?;base64,/, "");
+        const buffer = Buffer.from(cleanBase64, "base64");
+        fs.writeFileSync(targetPath, buffer);
+      } else {
+        // Create an initial empty PDF document if no data provided
+        const doc = await PDFDocument.create();
+        const page = doc.addPage([595.28, 841.89]);
+        page.drawText(`High Court Cause List: ${safeName}`, { x: 50, y: 800, size: 14 });
+        const pdfBytes = await doc.save();
+        fs.writeFileSync(targetPath, pdfBytes);
+      }
+
+      appendLog("INFO", `[INBOX] New cause list PDF uploaded to inbox: ${safeName}`);
+      res.json({ success: true, filename: safeName });
+    } catch (err: any) {
+      appendLog("ERROR", `Failed to upload to inbox: ${err.message}`);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Create a realistic demo High Court Cause List in inbox
+  app.post("/api/inbox/create-sample", async (req, res) => {
+    try {
+      const sampleDoc = await PDFDocument.create();
+      const page = sampleDoc.addPage([595.28, 841.89]);
+      const fontBold = await sampleDoc.embedFont(StandardFonts.HelveticaBold);
+      const fontReg = await sampleDoc.embedFont(StandardFonts.Helvetica);
+
+      page.drawText("HIGH COURT OF JUDICATURE", { x: 190, y: 800, size: 14, font: fontBold });
+      page.drawText(`DAILY CAUSE LIST - ${new Date().toLocaleDateString("en-IN")}`, { x: 175, y: 780, size: 10, font: fontBold });
+      page.drawText("COURT HALL 1 (HON'BLE CHIEF JUSTICE BENCH)", { x: 160, y: 760, size: 9, font: fontReg });
+      page.drawLine({ start: { x: 40, y: 745 }, end: { x: 555, y: 745 }, thickness: 1 });
+
+      let y = 720;
+      for (const item of SAMPLE_HIGH_COURT_CASES) {
+        page.drawText(`Item ${item.item_no || 1}: ${item.case_no} | ${item.parties.slice(0, 45)}`, { x: 40, y, size: 8, font: fontBold });
+        page.drawText(`Advocates: ${item.pet_advocate}  vs  ${item.resp_advocate}`, { x: 40, y: y - 12, size: 7.5, font: fontReg });
+        y -= 30;
+      }
+
+      const sampleFilename = `HighCourt_CauseList_${new Date().toISOString().slice(0, 10)}.pdf`;
+      const targetPath = path.join(INBOX_DIR, sampleFilename);
+      const bytes = await sampleDoc.save();
+      fs.writeFileSync(targetPath, bytes);
+
+      appendLog("INFO", `[INBOX] Placed official sample cause list PDF in inbox: ${sampleFilename}`);
+      res.json({ success: true, filename: sampleFilename });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Remove file from inbox
+  app.delete("/api/inbox/:filename", (req, res) => {
+    try {
+      const filename = path.basename(req.params.filename);
+      const targetPath = path.join(INBOX_DIR, filename);
+      if (fs.existsSync(targetPath)) {
+        fs.unlinkSync(targetPath);
+        appendLog("INFO", `[INBOX] Removed cause list file from inbox: ${filename}`);
+      }
+      res.json({ success: true, filename });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ==========================================
+  // SYSTEM SETTINGS ENDPOINTS
+  // ==========================================
+  const SETTINGS_PATH = path.join(DATA_DIR, "system_settings.json");
+  const defaultSettings = {
+    courtName: "HIGH COURT OF JUDICATURE",
+    defaultBench: "Division Bench I & Commercial Single Benches",
+    messageTemplate: `🏛️ *HIGH COURT CAUSE LIST DISPATCH*
+*Advocate:* {advocate_name}
+*Date:* {date}
+*Listed Matters:* {case_count} Case(s) Today
+
+{cases_list}
+
+📄 *Executive PDF:* Please download your personalized cause list PDF on the portal.
+_Automated Dispatch by Cause List Bot_`
+  };
+
+  app.get("/api/settings", (req, res) => {
+    try {
+      if (!fs.existsSync(SETTINGS_PATH)) {
+        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(defaultSettings, null, 2), "utf-8");
+        return res.json(defaultSettings);
+      }
+      const raw = fs.readFileSync(SETTINGS_PATH, "utf-8");
+      res.json({ ...defaultSettings, ...JSON.parse(raw) });
+    } catch (e) {
+      res.json(defaultSettings);
+    }
+  });
+
+  app.post("/api/settings", (req, res) => {
+    try {
+      const incoming = req.body || {};
+      const updated = {
+        courtName: incoming.courtName || defaultSettings.courtName,
+        defaultBench: incoming.defaultBench || defaultSettings.defaultBench,
+        messageTemplate: incoming.messageTemplate || defaultSettings.messageTemplate
+      };
+      fs.writeFileSync(SETTINGS_PATH, JSON.stringify(updated, null, 2), "utf-8");
+      appendLog("INFO", `[SETTINGS] Updated system courtroom settings: ${updated.courtName}`);
+      res.json({ success: true, settings: updated });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -810,7 +1160,7 @@ async function startServer() {
 
       const result: Record<string, string> = {};
       for (const file of filesToRead) {
-        const fullPath = path.join(__dirname, file);
+        const fullPath = path.join(ROOT_DIR, file);
         if (fs.existsSync(fullPath)) {
           result[file] = fs.readFileSync(fullPath, "utf-8");
         }
@@ -1257,6 +1607,19 @@ Please check your personalized cause list PDF on the portal.`;
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // Global Express error handler
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error("[EXPRESS ERROR]", err);
+    appendLog("ERROR", `Unhandled route error: ${err.message || String(err)}`);
+    if (res.headersSent) {
+      return next(err);
+    }
+    res.status(500).json({
+      error: "Internal Server Error",
+      message: err.message || "An unexpected server error occurred."
+    });
   });
 
   // ==========================================

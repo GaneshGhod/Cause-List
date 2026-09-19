@@ -77,3 +77,17 @@ export interface WhatsAppTestResult {
   details: string;
   rawResponse?: any;
 }
+
+export interface InboxFile {
+  filename: string;
+  sizeBytes: number;
+  sizeFormatted: string;
+  uploadedAt: string;
+  status: "pending" | "processed";
+}
+
+export interface SystemSettings {
+  courtName: string;
+  defaultBench: string;
+  messageTemplate: string;
+}
