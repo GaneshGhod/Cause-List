@@ -1,0 +1,8 @@
+# Dependencies for Cause List Bot
+# Python 3.9+
+
+pdfplumber>=0.11.0
+reportlab>=4.2.0
+selenium>=4.20.0
+webdriver-manager>=4.0.1
+streamlit>=1.35.0

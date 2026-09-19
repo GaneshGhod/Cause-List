@@ -1,0 +1,6 @@
+{
+  "name": "Cause List Bot",
+  "description": "Automated High Court cause list PDF parser, per-lawyer case matching, and WhatsApp delivery dispatch dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,120 @@
+[
+  {
+    "id": "SUB-001",
+    "display_name": "Adv. Rajesh K. Sharma",
+    "name_variants": [
+      "Rajesh Sharma",
+      "R. K. Sharma",
+      "Rajesh K Sharma",
+      "R.Sharma"
+    ],
+    "whatsapp_number": "+919820123456",
+    "active": true
+  },
+  {
+    "id": "SUB-002",
+    "display_name": "Adv. Priya Venkataraman",
+    "name_variants": [
+      "Priya Venkataraman",
+      "P. Venkataraman",
+      "Priya V.",
+      "P Venkat"
+    ],
+    "whatsapp_number": "+919811234567",
+    "active": true
+  },
+  {
+    "id": "SUB-003",
+    "display_name": "Adv. Amit Kumar Deshmukh",
+    "name_variants": [
+      "Amit Deshmukh",
+      "Amit K. Deshmukh",
+      "A. K. Deshmukh",
+      "Amit Deshmuk"
+    ],
+    "whatsapp_number": "+919833445566",
+    "active": true
+  },
+  {
+    "id": "SUB-004",
+    "display_name": "Adv. Sneha Singhania",
+    "name_variants": [
+      "Sneha Singhania",
+      "S. Singhania",
+      "Sneha S."
+    ],
+    "whatsapp_number": "+919876543210",
+    "active": true
+  },
+  {
+    "id": "SUB-005",
+    "display_name": "Adv. Vikramaditya Malhotra",
+    "name_variants": [
+      "Vikram Malhotra",
+      "Vikramaditya Malhotra",
+      "V. Malhotra",
+      "Vikram M."
+    ],
+    "whatsapp_number": "+919822334455",
+    "active": false
+  },
+  {
+    "id": "SUB-006",
+    "display_name": "Adv. Meenakshi Sundaram",
+    "name_variants": [
+      "Meenakshi Sundaram",
+      "M. Sundaram",
+      "M Sundaram",
+      "Meenakshi S"
+    ],
+    "whatsapp_number": "+919444123890",
+    "active": true
+  },
+  {
+    "id": "SUB-007",
+    "display_name": "Adv. Anand S. Rao",
+    "name_variants": [
+      "Anand Rao",
+      "Anand S. Rao",
+      "A. S. Rao",
+      "A.S.Rao"
+    ],
+    "whatsapp_number": "+919845012345",
+    "active": true
+  },
+  {
+    "id": "SUB-008",
+    "display_name": "Adv. Farhan Ahmed Qureshi",
+    "name_variants": [
+      "Farhan Qureshi",
+      "Farhan A. Qureshi",
+      "F. A. Qureshi",
+      "Farhan Ahmed"
+    ],
+    "whatsapp_number": "+919890112233",
+    "active": true
+  },
+  {
+    "id": "SUB-009",
+    "display_name": "Adv. Sunita S. Joshi",
+    "name_variants": [
+      "Sunita Joshi",
+      "Sunita S. Joshi",
+      "S. S. Joshi",
+      "S. Joshi"
+    ],
+    "whatsapp_number": "+919823098765",
+    "active": true
+  },
+  {
+    "id": "SUB-010",
+    "display_name": "Adv. Deepa Narayanan",
+    "name_variants": [
+      "Deepa Narayanan",
+      "D. Narayanan",
+      "Deepa N."
+    ],
+    "whatsapp_number": "+919940123789",
+    "active": false
+  }
+]
